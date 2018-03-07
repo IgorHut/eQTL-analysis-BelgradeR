@@ -1,0 +1,795 @@
+---
+title: "Basic eQTL analysis guide"
+author: "Igor Hut"
+date: "05/03/2018"
+output:
+  html_document:
+    theme: flatly
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  html_notebook:
+    toc: yes
+  pdf_document:
+    toc: yes
+    toc_depth: 4
+---
+
+
+<!--download fajla --> 
+```{r, comment = NA, results = 'asis', echo = F}
+library(base64enc)
+
+add_download_link = function(file){
+  cat(sprintf(paste0("<a href='%s' target='_blank' download='",file,"'>
+   <span class='glyphicon glyphicon-cloud-download' style='font-size:1.2em;'></span> Download
+  </a>"),
+   base64enc::dataURI(file = file, mime = 'text/rmd')        
+  ))
+}
+
+add_download_link("basic_eqtl_guide.Rmd")
+```
+
+
+##Preparation and basic stats
+Genomic data set - chr22_GEUVADIS_358_continental
+
+
+####Loading the data
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(tidyr)
+library(dplyr)
+
+snps = read_tsv("/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/SNP_voja.txt")
+expr = read_tsv("/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/GE_voja.txt")
+```
+
+
+### Basic stats
+
+To get a basic idea of how many samples, genes and which genotyped positions are available in the data set, we'll print out the "head" and dimensions of the loaded data sets. For the first 10 genes we'll print out the mean expression levels + standard deviation. The same goes for the first 10 SNPs in the `snps` data frame.
+
+```{r}
+head(expr)[1:12]
+dim(expr)
+head(snps)[1:12]
+dim(snps)
+
+paste("Mean value of expression for gene ",expr$geneid[1:10]," is ", rowMeans(expr[1:10, -1]))
+paste("Standard deviation of expression for gene ", expr$geneid[1:10]," is ", t(apply(expr[1:10, -1], 1, sd)))
+
+
+paste("Mean value for SNP ",snps$snipid[1:10]," is ", rowMeans(snps[1:10, -1]))
+paste("Standard deviation for SNP ", snps$snipid[1:10]," is ", t(apply(snps[1:10, -1], 1, sd)))
+
+```
+
+### MAF
+Minor allele frequency (MAF) is a measure of the presence of an allele in a population. 
+More precisely MAF refers to the frequency at which the second most common allele occurs in a given population.
+Every individual person has about 4.1-5 million bases in which he differs from the reference genome ([ref](http://www.nature.com/nature/journal/v526/n7571/full/nature15393.html#a-typical-genome)). Some of those variants are common in a certain population, others not. In order to measure the "rareness"" of a specific variant (allele) MAF can be calculated. In case of single nucleotide polymorphisms there can be up to four different alleles in one position (A, C, G, T). Those alleles can be homozygous or heterozygous, when the maternal allele was different from the paternal allele at that position.
+SNPs in a population are always defined by the genomic position and by two alleles: The allele defined in the reference genome and one allele present in some individuals, but different from the reference sequence. 
+
+*An example:*
+
+![Spotting the differences.](SNPs.png)
+
+This individual has two SNPs, he is heterozygous in one of them and homozygous in the other. In eQTL analyses a SNP is always defined as a single allele being different from the reference. If in a population there are multiple different alleles for one position, they would be treated as independent entities of SNPs.
+Now we know that in eQTL analyses SNPs can only have two alleles: The reference and the alternative.
+Calculating MAF is essentially counting the presence of the alleles in a population and representing it as a percentage. Each individual can have 0, 1 or 2 times the alternative allele.
+
+####Example
+The term MAF implies that the allele for which we return the measure has to be the minor (= less common) allele. This means that the MAF is smaller than 0.5 by definition.
+
+So let's now calculate the MAF for all SNPs among all individuals and correct the returned values so that the value is always given in respect to the minor allele. Then we'll plot a histogram of the MAFs of all SNPs
+
+```{r}
+library(MASS)
+maf = rowMeans(snps[-1])/2
+sum(maf > 0.5) # so there are 21130 alleses which are actually major alleles in this population sample
+
+# To ensure we actually get the MAF this needs to be inverted.
+maf <- pmin(maf, 1-maf)
+
+truehist(maf, main = "Histogram of MAF values.", col = "steelblue")
+lines(density(maf), lty = 2, col = "darkorange", lwd = 3)
+
+```
+
+###Filtering SNPs by MAF
+In an eQTL study often a minimum MAF is required. Since MAF essentially reflects how often an allele has been observed in a population, it also defines how often the gene expression levels have been observed for heterozygous and homozygous alleles.
+
+####Example
+Calculate the number of heterozygous and homozygous observations expected for SNPs with a MAF of 5%, 10% and 15% in a sample of 500 individuals given [Hardy-Weinberg equilibrium](https://www.nature.com/scitable/knowledge/library/the-hardy-weinberg-principle-13235724). What are useful MAF thresholds for SNPs to include in an eQTL analysis?
+
+```{r}
+p = c(0.05, 0.1, 0.15)
+q = 1-p
+# Calulate frequency of minor allele being present in homozygous and heterozygous state
+f_hom = p^2
+f_het = 2*p*q
+# Expected number of observations in a sample size of 10000
+sample_size = 500
+round(f_hom * sample_size)
+round(f_het * sample_size)
+```
+
+###Gene expression profiling
+Now that we have an idea of what is stored in the genotype data frame let's take a look at the expression data. For eQTL analyses it is important for the gene expression to be normally distributed among samples, therefore *RNA-seq* data has to be transformed by, for example quantile normalization.
+
+Let's check the distribution of gene expression levels across samples for the first gene in our `expr` data frame.
+
+```{r}
+gname = expr$geneid[1]
+gname
+truehist(as.numeric(filter(expr, geneid == gname)[-1]), main = paste("Gene expression profile for gene:",gname), xlab = "Expression level", col = "darkorange")
+lines(density(as.numeric(filter(expr, geneid == gname)[-1])), lty = 2, col = "steelblue", lwd = 3)
+```
+
+####Example
+Now we'll plot the expression levels of the first gene against the first SNP, 10th gene against the 10th SNP, 10th gene against the 1th SNP, as well as the 10th gene against the 6th SNP, depending on the genotypes of the samples by using simple dot plots. We'll add a bit of random noise (jitter) to the genotype data to make it all look more comprehensible.
+```{r}
+genotype = c("snp_1", "snp_10", "snp_1", "snp_6")
+genes = c("gene_1", "gene_10", "gene_10", "gene_10")
+par(mfrow=c(1,length(genotype)))
+
+plot(jitter(as.numeric(snps[1,-1]), factor = 0.5), as.numeric(expr[1,-1]),
+     xlab = genotype[1], ylab = genes[1], col = "steelblue",
+     main = paste(genes[1], "vs", genotype[1]), xlim= c(-0.5,2.5), xaxt="n")
+axis(1, at =c (0,1,2), labels = c("0", "1", "2"))
+plot(jitter(as.numeric(snps[10,-1]), factor = 0.5), as.numeric(expr[10,-1]),
+     xlab = genotype[2], ylab = genes[2], col = "steelblue",
+     main = paste(genes[2], "vs", genotype[2]), xlim= c(-0.5,2.5), xaxt="n")
+axis(1, at =c (0,1,2), labels = c("0", "1", "2"))
+plot(jitter(as.numeric(snps[1,-1]), factor = 0.5), as.numeric(expr[10,-1]),
+     xlab = genotype[3], ylab = genes[3], col = "steelblue",
+     main = paste(genes[3], "vs", genotype[3]), xlim= c(-0.5,2.5), xaxt="n")
+axis(1, at =c (0,1,2), labels = c("0", "1", "2"))
+plot(jitter(as.numeric(snps[6,-1]), factor = 0.5), as.numeric(expr[10,-1]),
+     xlab = genotype[4], ylab = genes[4], col = "steelblue",
+     main = paste(genes[4], "vs", genotype[4]), xlim= c(-0.5,2.5), xaxt="n")
+axis(1, at =c (0,1,2), labels = c("0", "1", "2"))
+
+
+```
+
+Let's do a bit of data wrangling for easier downstream analysis and efficient plotting. Namely we'll transpose our data frames so that we have variables, i.e. SNPs and expression levels as columns and samples as rows.
+```{r}
+expr_trans = data.frame(t(expr[, -1]))
+colnames(expr_trans)=t(expr[, 1])
+expr_trans = tibble::rownames_to_column(expr_trans, "sample")
+head(expr_trans)[1:10]
+
+# and the same for genotype data
+snps_trans = data.frame(t(snps[-1]))
+colnames(snps_trans)=t(snps[, 1])
+snps_trans = tibble::rownames_to_column(snps_trans, "sample")
+head(snps_trans)[1:10]
+
+```
+
+Another convenient way to display gene expression values by genotype is as box plots. These provide a good, nonparametric, indication of the distributions. To convey a sense of the frequency of each genotype in the sample it is useful to also add points for each individual to the plot. Below is an example of how this might look for first ten SNP/gene pairs. This time we'll use R's `ggplot2` library to generate visualization. 
+
+```{r}
+library(ggplot2)
+
+#Reshape dataframes a bit for use with ggplot2
+snps_long = tidyr::gather(snps_trans[, 1:5], snp, genotype, -sample)
+expr_long = tidyr::gather(expr_trans[, 1:5], gene, expression, -sample)
+head(snps_long)
+head(expr_long)
+
+data_long <- cbind(snps_long, expr_long["expression"])
+data_long$genotype <- as.factor(data_long$genotype)
+head(data_long)
+ggplot(data_long, aes(genotype, expression)) +
+  geom_jitter(colour = "darkorange",alpha = 0.3, width = 0.02) +
+  geom_boxplot(alpha = 0.5, fill = "steelblue") +
+  facet_wrap(~snp) 
+
+# Let's do that for more SNPs and genes, just to see whether we could catch any
+# visible correlations
+
+snps_long = tidyr::gather(snps_trans[, 1:10], snp, genotype, -sample)
+expr_long = tidyr::gather(expr_trans[, 1:10], gene, expression, -sample)
+head(snps_long)
+head(expr_long)
+
+data_long <- cbind(snps_long, expr_long["expression"])
+data_long$genotype <- as.factor(data_long$genotype)
+head(data_long)
+ggplot(data_long, aes(genotype, expression)) +
+  geom_jitter(colour = "darkorange",alpha = 0.3, width = 0.02) +
+  geom_boxplot(alpha = 0.5, fill = "steelblue", 
+               position = position_dodge(width = 0)) +
+  facet_wrap(~snp) 
+
+```
+
+## Understanding the basics
+This chapter should explain the basic ideas behind eQTL analyses. What we are doing here is not what one would do to run an actual eQTL analysis.  Here we'll try to explain how eQTL mapping works in general.
+
+###Linear regression of genotype on phenotype
+The most common way of estimating the effect of a SNP on gene expression is by performing a linear regression of sample genotypes on sample gene expression levels. So to obtain estimates of the genotypic contribution to gene expression we fit a simple linear regression model of the form $E_i = \beta_0 + \beta G_i + \epsilon$, where $E_i$ is the vector of gene expression values for gene $i$ and $G_i$ is the genotype vector for the SNP $i$. We are interested in the estimate for $\beta$ which indicates the change in gene expression for each copy of the second allele
+
+The p-value indicates the significance of the genetic component in the model. Let’s try that for gene 10 with SNP 1 and SNP 6.
+
+```{r}
+lm_1_10 = lm(expr_trans[, 11] ~ snps_trans[, 2])
+summary(lm_1_10)
+
+lm_6_10 = lm(expr_trans[, 11] ~ snps_trans[, 7])
+summary(lm_6_10)
+```
+This is the standard summary output from R for linear regressions. Since we are interested in eQTLs our main interest lies in the second line of “Coefficients”. What is stated as “Estimate” is the slope of the linear regression, which in eQTL terms is called “effect size” or already mentioned "beta". In eQTL studies one normally compares thousands of genes for which each hundreds to thousands of SNPs have been tested. The common way to identify eQTLs is by their *p-value*. The *p-value* given here as *(Pr(>|t|))* will later be referred to as raw *p-value*. It can be calculated in many different ways, here it is based on the *t-value* which is derived from the estimation of the coefficient and its standard error. For a nice explanation of the summary(lm) output check [here](http://stats.stackexchange.com/questions/5135/interpretation-of-rs-lm-output).
+
+It is obvious that these two models don't catch any significant effect of explored SNPs and gene expression levels. In fact it is very hard to catch such effects by "manually" exploring real-world genomic data, usually containing tens or hundreds of thousands SNPs and hundreds or thousands gene expressions for large number of samples.
+
+Hence for the sake of making a comprehensable example we'll partially repeat the previous EDA process with a dummy, i.e. simulated data set, which can be found [here](https://github.com/jknightlab/eqtl-intro/tree/master/docker/data/simulated)
+
+```{r, message=FALSE, warning=FALSE}
+gt = read.table("/Users/igorhut/Documents/eQTL/jknightlab-eqtl-intro-e17c9f5/docker/data/simulated/sim_genotypes.tab", sep="\t",
+header=TRUE, row.names = 1)
+expr = read.table("/Users/igorhut/Documents/eQTL/jknightlab-eqtl-intro-e17c9f5/docker/data/simulated/sim_expression1.tab", sep="\t",
+header=TRUE, row.names = 1)
+
+head(gt)
+head(expr)
+dim(gt)
+dim(expr)
+
+# Calculate MAF and draw MAF histogram
+maf <- colMeans(gt)/2
+maf
+maf <- pmin(maf, 1-maf)
+maf
+sum(maf > 0.5)
+truehist(maf, main = "Histogram of MAF values.", col = "steelblue")
+lines(density(maf), lty = 2, col = "darkorange", lwd = 3)
+
+
+snps = c("snp_1", "snp_10", "snp_1")
+genes = c("gene_1", "gene_10", "gene_10")
+par(mfrow=c(1,length(snps)))
+
+for (index in seq(length(snps))){
+  genotype = gt[[snps[index]]]
+  expression = expr[[genes[index]]]
+  plot(jitter(genotype, factor = 0.4), expression,
+  main=paste(snps[index], "vs", genes[index]), xlim= c(-0.5,2.5),
+  xlab = "genotype", xaxt="n", col ="steelblue")
+  axis(1, at=c(0,1,2), labels = c("0", "1", "2"))
+}
+
+#Reshape dataframes a bit for use with ggplot2
+genoLong = tidyr::gather(gt, snp, genotype)
+exprLong = tidyr::gather(expr, gene, expression)
+dataLong = cbind(genoLong, exprLong["expression"])
+dataLong$genotype = as.factor(dataLong$genotype)
+
+ggplot(dataLong, aes(genotype, expression)) +
+    geom_jitter(colour = "darkorange",alpha = 0.3, width = 0.2) +
+    geom_boxplot(alpha=0.6, fill="steelblue",
+                 position=position_dodge()) +
+    facet_wrap(~snp) 
+
+
+```
+
+Let’s again try linear regression for gene 10 with snp 1 and snp 10
+
+```{r, message=FALSE, warning=FALSE}
+lm_1_10 = lm(expr[, "gene_10"]~ gt[, "snp_1"])
+summary(lm_1_10)
+
+lm_10_10 = lm(expr[, "gene_10"] ~ gt[,"snp_10"])
+summary(lm_10_10)
+
+```
+
+Let's plot these regression lines over scatter plots from before:
+
+```{r}
+snps = c("snp_1", "snp_10", "snp_1")
+genes = c("gene_1", "gene_10", "gene_10")
+par(mfrow=c(1,length(snps)))
+
+for (index in seq(length(snps))){
+  genotype = gt[[snps[index]]]
+  expression = expr[[genes[index]]]
+  lm_result = lm(expression ~ genotype)
+  plot(jitter(genotype, factor = 0.4), expression,
+  main=paste(snps[index], "vs", genes[index]), xlim= c(-0.5,2.5),
+  xlab = "genotype", xaxt="n", col ="steelblue")
+  abline(lm_result, col="darkorange")
+  axis(1, at=c(0,1,2), labels = c("0", "1", "2"))
+  # Add p-values as text
+  y_range = range(expression)
+  text(x=1, y=y_range[1] + 0.95*diff(y_range), paste0("p=",
+  format(summary(lm_result)$coefficients[2,4],
+  scentific=TRUE, digits=2)))
+  }
+```
+
+A nicer way to plot these results via `ggplot2`:
+```{r, message=TRUE, warning=TRUE}
+genoLong = tidyr::gather(gt, snp, genotype, snp_1, snp_10)
+exprLong = tidyr::gather(expr, gene, expression, gene_1, gene_10)
+dataLong = cbind(genoLong[,c("snp", "genotype")], exprLong[,c("gene", "expression")])
+dataLong$comparison = paste(dataLong$snp, "vs", dataLong$gene)
+dataLong$genotype = factor(dataLong$genotype)
+
+ggplot(dataLong, aes(genotype, expression)) +
+    geom_jitter(col="darkorange", position=position_jitter(width=0.25)) +
+    geom_boxplot(outlier.size=0, alpha=0.6, fill="steelblue") +
+    geom_smooth(method = 'lm',col="darkred", aes(group=1), se=FALSE) +
+    facet_wrap(~comparison) 
+
+
+```
+
+###Why should we care about MAF
+
+```{r}
+fit <- mapply(function(e, g) lm(e ~ g), expr, gt, SIMPLIFY=FALSE)
+betaHat <- sapply(fit, coef)[2,]
+betaHat
+```
+We'll use the R's function `confint` to obtain 95% confidence intervals of the estimated SNP effects.
+
+```{r}
+ci <- sapply(fit, confint, "g")
+rownames(ci) <- c("lower", "upper")
+ci
+```
+Now let's plot confidence intervals for $\hat{\beta_i}$ in respect to MAFs.
+
+```{r}
+estimates = data.frame(Estimate=betaHat, t(ci), MAF=maf)
+ggplot(estimates, aes(x=MAF)) + 
+  geom_hline(yintercept=1.5, colour = "darkorange") +
+  geom_hline(yintercept=0, colour = "darkred", linetype="longdash") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), colour = "steelblue") +
+  geom_point(aes(y=Estimate), colour = "steelblue") 
+```
+
+In this example all resulting confidence intervals include the true value but intervals for small minor allele frequencies are large (and in one case this means that 0 is included in the CI). As one would expect the uncertainty in the estimate, as measured by the width of the confidence interval, decreases with increasing minor allele frequency. However, even at high MAF considerable uncertainty remains and point estimates are somewhat lacking in accuracy, overestimating the true effect.
+
+###Covariates
+Many different factors can affect gene expression, such as age, sex, smoking habits, genetic mutations or environmental factors, such as nutrition, etc. The more factors can be described in the model, the more accurate it will be and the higher are chances to find more subtle genetic effects.
+Covariates therefore are features of samples which may describe effects on gene expression. In technical terms one covariate is therefore a vector of the same length as there are samples, e.g.: age.
+The examples before worked nicely, because it was simulated data without any covariates. Now we will be using data where covariates have been modelled additionally. 
+Let's see how linear regression models behave depending on inclusion of covaraiates. We'll calculate the linear regression with and without the covariates for combination of gene 10 with snp 10.
+
+```{r, message=FALSE, warning=FALSE}
+expr_cov = read.table("/Users/igorhut/Documents/eQTL/jknightlab-eqtl-intro-e17c9f5/docker/data/simulated//sim_expression2.tab", sep="\t",
+header=TRUE, row.names = 1)
+covariates = read.table("/Users/igorhut/Documents/eQTL/jknightlab-eqtl-intro-e17c9f5/docker/data/simulated//sim_covariates.tab", sep="\t",
+header=TRUE, row.names = 1)
+
+head(expr_cov, 3)
+head(covariates, 3)
+dim(expr_cov)
+dim(covariates)
+
+lm_10_10 = lm(expr_cov[,"gene_10"] ~ gt[,"snp_10"])
+summary(lm_10_10)
+
+lm_10_10_covs = lm(expr_cov[,"gene_10"] ~ gt[,"snp_10"] + as.matrix(covariates))
+summary(lm_10_10_covs)
+
+
+```
+
+Let's plot the results:
+```{r}
+par(mfrow=c(1,2))
+
+plot(jitter(gt[,"snp_10"], factor = 0.4), expr_cov[,"gene_10"],
+  main="gene_10 vs snp_10", xlim= c(-0.5,2.5),
+  xlab = "genotype", xaxt="n", col ="steelblue")
+  abline(lm_10_10, col="darkorange", lwd = 2, lty = 2)
+  axis(1, at=c(0,1,2), labels = c("0", "1", "2"))
+  # Add p-values as text
+  y_range = range(expr_cov[,"gene_10"])
+  text(x=1, y=y_range[1] + 0.95*diff(y_range), paste0("p=",
+  format(summary(lm_10_10)$coefficients[2,4],
+  scentific=TRUE, digits=2)), col = "darkorange")
+  
+plot(jitter(gt[,"snp_10"], factor = 0.4), expr_cov[,"gene_10"],
+  main="gene_10 vs snp_10 incl. cov.", xlim= c(-0.5,2.5),
+  xlab = "genotype", xaxt="n", col ="steelblue")
+  abline(lm_10_10_covs, col="darkorange", lwd = 2, lty = 2)
+  axis(1, at=c(0,1,2), labels = c("0", "1", "2"))
+  # Add p-values as text
+  y_range = range(expr_cov[,"gene_10"])
+  text(x=1, y=y_range[1] + 0.95*diff(y_range), paste0("p=",
+  format(summary(lm_10_10_covs)$coefficients[2,4],
+  scentific=TRUE, digits=2)), col = "darkorange")
+  
+```
+
+### Using principle components as covariates
+Further we will explore the use of principle components as covariates in linear models of gene expression to account for unknown sources of variation. Let's use the data set from the previous exercise and include PC's, as covariates, in the linear model instead of known covariates we used previously.
+
+Check the data:
+```{r}
+head(expr_cov, 3)
+dim(expr_cov)
+
+```
+R provides the function `prcomp` for computing PCs. Like most standard R functions it expects data to be laid out with variables in columns and samples in rows, so we are good to go.
+
+```{r}
+pca <- prcomp(expr_cov, center=TRUE, scale = TRUE)
+head(pca$x, 3)
+```
+As you can see, since we have 10 variables, we got 10 PCs in total. Let's plot percentage of explained variance for all PCs. 
+
+```{r, message=FALSE, warning=FALSE}
+library(factoextra)
+plot(pca)
+fviz_eig(pca, addlabels = TRUE)
+```
+The variance accounted for by each component is available through the `sdev` field of the `prcomp` return value:
+
+```{r, message=FALSE, warning=FALSE}
+pca$sdev
+summary(pca)
+
+# or
+sum(pca$sdev[1:5]^2)/sum(pca$sdev^2) # percentage of variace explained by first 5 PCs
+pca$sdev[1]^2/sum(pca$sdev^2) # percentage of variance explained by the 1st PC
+```
+
+Since this is specifically modeled data, the first PC accounts for major part of variance. Let's do modeling and see how the model behaves depending on inclusion of PCs.
+
+```{r}
+# no PCs included
+lm_9_9 = lm(expr_cov[,"gene_9"] ~ gt[,"snp_9"])
+summary(lm_9_9)
+
+# let's now include the 1st PC
+lm_9_9_PC1 = lm(expr_cov[,"gene_9"] ~ gt[,"snp_9"] + as.numeric(pca$x[,1]))
+summary(lm_9_9_PC1)
+```
+Let's again plot the results:
+```{r}
+par(mfrow=c(1,2))
+
+plot(jitter(gt[,"snp_9"], factor = 0.4), expr_cov[,"gene_9"],
+  main="gene_9 vs snp_9", xlim= c(-0.5,2.5),
+  xlab = "genotype", xaxt="n", col ="steelblue")
+  abline(lm_9_9, col="darkorange", lwd = 2, lty = 2)
+  axis(1, at=c(0,1,2), labels = c("0", "1", "2"))
+  # Add p-values as text
+  y_range = range(expr_cov[,"gene_9"])
+  text(x=1, y=y_range[1] + 0.95*diff(y_range), paste0("p=",
+  format(summary(lm_9_9)$coefficients[2,4],
+  scentific=TRUE, digits=2)), col = "darkorange")
+  
+plot(jitter(gt[,"snp_9"], factor = 0.4), expr_cov[,"gene_9"],
+  main="gene_9 vs snp_9 incl. PC1", xlim= c(-0.5,2.5),
+  xlab = "genotype", xaxt="n", col ="steelblue")
+  abline(lm_9_9_PC1, col="darkorange", lwd = 2, lty = 2)
+  axis(1, at=c(0,1,2), labels = c("0", "1", "2"))
+  # Add p-values as text
+  y_range = range(expr_cov[,"gene_9"])
+  text(x=1, y=y_range[1] + 0.95*diff(y_range), paste0("p=",
+  format(summary(lm_9_9_PC1)$coefficients[2,4],
+  scentific=TRUE, digits=2)), col = "darkorange")
+```
+
+## Large scale eQTL analysis
+
+Now that we've covered the basics let's focus on real world expression and genotyping data. We'll be using R's `MatrixEQTL` package which is designed for fast eQTL analysis on large genomic data sets. `MatrixEQTL` can test for association between genotype and gene expression using linear regression with either additive or ANOVA genotype effects. The models can include covariates to account for factors as population stratification, gender, and clinical variables.
+It also supports models with heteroscedastic and/or correlated errors, false discovery rate estimation and separate treatment of local (cis) and distant (trans) eQTLs. You can learn more about `MatrixEQTL` [here](http://www.bios.unc.edu/research/genomic_software/Matrix_eQTL/).
+
+### Importing and preprocessing genotype and expression data
+
+Genotype and expression data come in all sorts of flavours and preprocessing of this data needs to be done rather carefully. In this short introduction it is not possible to cover this topic in detail. Common input formats for genotypes are VCF, PLINK files, or even other custom files which give the genotype of each sample on all queried genomic positions. Expression data can also be made available in various formats depending on the underlying technology (RNAseq or expression micro array). Good portion of publicly available eQTL data sets are, still, from microarray experiments. 
+
+### cis-eQTL and trans-eQTL analysis
+
+To perform an eQTL analysis we don’t only need to know the genotype and gene expression values for every sample, but also the genomic positions of genes and SNPs. This is necessary to define which SNPs should be tested against which genes. For cis-eQTL analyses SNPs in proximity to the gene are chosen and for trans-eQTL analyses SNPs further away, or on different chromosomes, are taken into account. The window in cis-eQTL analysis is commonly chosen to be 500kb-1Mb measured from gene's TSS.
+
+#### Example
+Now let's go through an example of cis- trans-eQTL mapping with chr22_GEUVADIS_358_continental data.
+
+```{r, message=FALSE, warning=FALSE}
+# eQTL mapping, cis/trans, no pcs
+  suppressMessages(library(MatrixEQTL))
+
+  
+  SNP_file_name <-  "/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/SNP_voja.txt";
+  snps_location_file_name <- "/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/snpsloc_voja.txt";
+  expression_file_name <- "/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/GE_voja.txt";
+  gene_location_file_name <- "/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/geneloc_voja.txt";
+  covariates_file_name <- "/Users/igorhut/Documents/eQTL/Data/Voja_QTL_tools/cov_voja.txt";
+  cis_threshold <- 1e-5
+  trans_threshold <- 1e-5
+  cis_dist <- 1e6
+  
+  
+  # Output file name
+  output_file_name_cis = tempfile();
+  output_file_name_tra = tempfile();
+  # output_file_name_cis = "/Users/igorhut/Documents/eQTL/tools_comparison_R_proj/output_voja_cis_eqtls_1.txt";
+  # output_file_name_tra = "/Users/igorhut/Documents/eQTL/tools_comparison_R_proj/output_voja_trans_eqtls_1.txt";
+  
+  ## Settings
+  # Linear model to use, modelANOVA, modelLINEAR, or modelLINEAR_CROSS
+  useModel = modelLINEAR; # modelANOVA, modelLINEAR, or modelLINEAR_CROSS
+
+  # Only associations significant at this level will be saved
+  pvOutputThreshold_cis = cis_threshold;
+  pvOutputThreshold_tra = trans_threshold;
+  
+  # Set to character() for no covariates
+  # covariates_file_name = character();
+  
+  # Error covariance matrix
+  # Set to numeric() for identity.
+  errorCovariance = numeric();
+  
+  # Distance for local gene-SNP pairs
+  cisDist = cis_dist
+  
+  ## Load genotype data
+  snps = SlicedData$new();
+  snps$fileDelimiter = "\t"; # the TAB character
+  snps$fileOmitCharacters = "NA"; # denote missing values;
+  snps$fileSkipRows = 1; # one row of column labels
+  snps$fileSkipColumns = 1; # one column of row labels
+  snps$fileSliceSize = 2000; # read file in slices of 2,000 rows
+  snps$LoadFile(SNP_file_name);
+  
+  ## Load gene expression data
+  gene = SlicedData$new();
+  gene$fileDelimiter = "\t"; # the TAB character
+  gene$fileOmitCharacters = "NA"; # denote missing values;
+  gene$fileSkipRows = 1; # one row of column labels
+  gene$fileSkipColumns = 1; # one column of row labels
+  gene$fileSliceSize = 2000; # read file in slices of 2,000 rows
+  gene$LoadFile(expression_file_name);
+  
+  ## Load covariates
+  cvrt = SlicedData$new();
+  cvrt$fileDelimiter = "\t"; # the TAB character
+  cvrt$fileOmitCharacters = "NA"; # denote missing values;
+  cvrt$fileSkipRows = 1; # one row of column labels
+  cvrt$fileSkipColumns = 1; # one column of row labels
+  if(length(covariates_file_name)>0) {
+    cvrt$LoadFile(covariates_file_name);
+  }
+  
+  ## Run the analysis
+  snpspos = read.table(snps_location_file_name, header = TRUE, stringsAsFactors = FALSE);
+  genepos = read.table(gene_location_file_name, header = TRUE, stringsAsFactors = FALSE);
+  
+me = Matrix_eQTL_main(
+  snps = snps,
+  gene = gene,
+  cvrt = cvrt,
+  output_file_name = output_file_name_tra,
+  pvOutputThreshold = pvOutputThreshold_tra,
+  useModel = useModel,
+  errorCovariance = errorCovariance,
+  verbose = FALSE,
+  output_file_name.cis = output_file_name_cis,
+  pvOutputThreshold.cis = pvOutputThreshold_cis,
+  snpspos = snpspos,
+  genepos = genepos,
+  cisDist = cisDist,
+  pvalue.hist = TRUE,
+  min.pv.by.genesnp = FALSE,
+  noFDRsaveMemory = FALSE);
+  
+  me_qq = Matrix_eQTL_main(
+    snps = snps,
+    gene = gene,
+    cvrt = cvrt,
+    output_file_name = output_file_name_tra,
+    pvOutputThreshold = pvOutputThreshold_tra,
+    useModel = useModel,
+    errorCovariance = errorCovariance,
+    verbose = FALSE,
+    output_file_name.cis = output_file_name_cis,
+    pvOutputThreshold.cis = pvOutputThreshold_cis,
+    snpspos = snpspos,
+    genepos = genepos,
+    cisDist = cisDist,
+    pvalue.hist = "qqplot",
+    min.pv.by.genesnp = FALSE,
+    noFDRsaveMemory = FALSE)
+  
+  unlink(output_file_name_tra);
+  unlink(output_file_name_cis);
+  
+  cat('Analysis done in: ', me$time.in.sec, ' seconds', '\n');
+  head(me$cis$eqtls)
+  head(me$trans$eqtls)
+  
+  ## Make the histogram of local and distant p-values
+  plot(me)
+  
+  ## Make the qq-plot of local and distant p-values
+  plot(me_qq)  
+
+```
+
+
+### Multiple testing correction
+Whenever multiple statistical tests are performed, a multiple testing correction has to be performed. This is necessary because many hypotheses are tested. Therefore each calculated association p-value has to be corrected for multiple testing. `MatrixEQTL` does this for you automatically and returns the corrected p-value as a false discovery rate (FDR). Common thresholds on FDR are 5% or 10%.
+
+## Interpreting eQTL results
+
+### Linkage disequilibrium (LD)
+Linkage disequilibrium (LD) is a very important effect that plays a big role in genetic association studies. It describes the fact that genetic variants are not always inherited independently due to recombination patterns during reproduction. SNPs in LD are inherited in similar patterns and therefore can explain gene
+expression in similar ways. This means that LD makes it harder for association studies to identify one single SNP being associated with altered gene expression. Also it is possible that the combination of SNPs (as a haplotype) causes differences in gene expression and not only one single SNP. Watch this video which explains the [basics of LD](https://elearning.cpp.edu/learning-objects/linkage-disequilibrium/).
+
+### Selecting eQTLs
+Commonly one selects at most one associated SNP per gene. If there are many SNPs associated with a gene it is most likely that those SNPs are highly linked to each other (“in high LD”) and therefore they describe the same effect. There are still cases in which genes are regulated by different SNPs independently, this cannot be readily determined from the table produced by `MatrixEQTL`. Here we will not try to identify the independent lead eQTL signals.
+
+#### Example
+Let's indentify which SNPs are (significantly) associated with which genes at a
+maximum FDR of 5% from the cis-eQTL results. We'll print a table in which only the lead SNP per gene is given. Also we'll add the MAF for every SNP in the table.
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+
+snp_values = read.table(SNP_file_name, row.names=1, header=TRUE)
+snp_values = data.frame(snps = rownames(snp_values), snp_values, stringsAsFactors = FALSE)
+
+top_eqtls = filter(me$cis$eqtls, FDR <= 0.05) %>% 
+  arrange(FDR) %>% 
+  distinct(gene, .keep_all = TRUE)
+
+mafs = apply(as.matrix(snp_values[-1]),1,mean)/2
+mafs = pmin(mafs, 1 - mafs)
+mafs = data.frame(snps=names(mafs), maf = mafs)
+top_eqtls = left_join(top_eqtls, mafs, by="snps")
+head(top_eqtls)
+```
+
+Whenever multiple statistical tests are performed, a multiple testing correction needs to be performed. This is necessary in order to compensate for the errors which arise from multiple hypothesis testing. Therefore each calculated association p-value has to be corrected. MatrixEQTL does this for you automatically and returns the corrected p-value as a false discovery rate (FDR). Common thresholds on FDR are 5% or 10%.
+
+## Presenting eQTL analysis results
+
+There are a few standard plots which are common in eQTL analyses. We already produced one of them earlier when we plotted gene expression versus genotype. This gives a visual insight in how clear the data was and what the linear regression actually detected.
+
+### Gene expression vs. genotype for the eqtl with the lowest association p-value
+
+Let's now plot gene expression vs. genotype for the eqtl with the lowest association FDR-value. Also we will add linear regression line for this isolated case.
+
+```{r, message=FALSE, warning=FALSE}
+# For this we also need df with expression data
+gene_values = read.table(expression_file_name, row.names=1, header=TRUE)
+gene_values = data.frame(gene = rownames(gene_values), gene_values, stringsAsFactors = FALSE)
+
+top_snp = top_eqtls$snps[1]
+top_gene = as.character(top_eqtls$gene[1])
+
+top_snp_data = filter(snp_values, snps == top_snp)
+top_gene_data = filter(gene_values, gene == top_gene)
+
+plot_data = t(bind_rows(top_snp_data[-1], top_gene_data[-1]))
+colnames(plot_data) = c("snp", "gene_expr")
+plot_data = as.data.frame(plot_data)
+plot_data$snp = as.factor(plot_data$snp)
+head(plot_data)
+
+lm_top = lm(plot_data[,"gene_expr"] ~ as.numeric(plot_data[,"snp"]))
+summary(lm_top)
+
+plot(plot_data, col="steelblue", 
+     main = paste0(top_gene, " vs ", top_snp))
+abline(lm_top, col="darkorange", lwd = 2, lty = 2)
+y_range = range(plot_data[,"gene_expr"])
+  text(x=2, y=y_range[1] + 0.5*diff(y_range), paste0("p=",
+  format(summary(lm_top)$coefficients[2,4],
+  scentific=TRUE, digits=2)), col = "darkorange")
+
+```
+
+
+### Manhanttan plots
+
+Manhattan plots are a way to depict association p-values of multiple SNPs at once. They are also very common in GWAS. Manhattan plots are a rather convinient modality for interpretation of eQTL signals in terms of LD.
+
+Let's now generate a manhattan plot for gene ENSG00000172404.4, plotting the base-pair position on the *x-axis* and the $-log_{10}(pvalue)$ of the SNP in the *y* axis. Manhattan plots usually depict all tested SNPs, not only the ones passing a certain p-value threshold. Therefore we'll first obtain all the association p-values for all tested SNPs for gene ENSG00000172404.4.
+
+```{r, message=FALSE, warning=FALSE}
+
+gene_id = "ENSG00000172404.4"
+
+gene_values = read.table(expression_file_name, row.names=1, header=TRUE)
+single_gene_exp = SlicedData$new()
+single_gene_exp$CreateFromMatrix(as.matrix(gene_values[gene_id, , drop=FALSE]))
+single_gene_exp
+
+snpspos = read.table(snps_location_file_name, 
+                     header = TRUE, 
+                     stringsAsFactors = FALSE)
+
+genepos = read.table(gene_location_file_name, 
+                     header = TRUE, 
+                     stringsAsFactors = FALSE)
+
+single_cis_eqtl_res = Matrix_eQTL_main(snps, 
+                                       single_gene_exp,
+                                       verbose = FALSE,
+                                       output_file_name.cis = NULL,
+                                       output_file_name = NULL,
+                                       pvOutputThreshold.cis=1, 
+                                       snpspos = snpspos,
+                                       genepos = genepos)
+
+manh_data = merge(single_cis_eqtl_res$cis$eqtls, snpspos, by.x = "snps", by.y = "snipid")
+manh_data = manh_data [,c("pos", "chr", "pvalue", "snps")]
+head(manh_data)
+# Plot the Manhattanplot
+with(manh_data ,plot(pos, -log10(pvalue), xlab = "genomic position (bp)",
+main=paste(gene_id, "associated SNPs")))
+# Highlight the lead SNP
+with(manh_data[which.min(manh_data$pvalue),,drop=FALSE] ,
+points(pos, -log10(pvalue), pch=20, col="red"))
+# Add a label to the lead SNP
+with(manh_data[which.min(manh_data$pvalue),,drop=FALSE],
+text(pos + diff(range(manh_data$pos))*0.2, -log10(pvalue), labels = snps))
+```
+
+Now produce manhattan plots for the top 3 cis-eQTL results and for the bottom 3 cis-eQTL in the `top_eqtls` matrix we have created earlier. 
+
+```{r, message=FALSE, warning=FALSE}
+for (gene_id in top_eqtls$gene[c(1:3,(nrow(top_eqtls)-3):nrow(top_eqtls))]){
+  print(gene_id)
+  single_gene_exp = SlicedData$new()
+  single_gene_exp$CreateFromMatrix(as.matrix(gene_values[gene_id,, drop=FALSE]))
+  
+  single_cis_eqtl_res = Matrix_eQTL_main(snps, single_gene_exp,
+      output_file_name.cis = NULL,
+      output_file_name = NULL,
+      pvOutputThreshold.cis=1,
+      verbose = FALSE,
+      snpspos=snpspos,
+      genepos=genepos)
+  
+  manh_data = merge(single_cis_eqtl_res$cis$eqtl, 
+                    snpspos, 
+                    by.x="snps", 
+                    by.y = "snipid")
+  manh_data =manh_data[,c("pos", "chr", "pvalue", "snps")]
+  par(mfrow=c(1,1))
+  # Plot the Manhattanplot
+  with(manh_data ,plot(pos, -log10(pvalue), xlab = "genomic position (bp)",
+  main=paste(gene_id, "associated SNPs")))
+  # Highlight the lead SNP
+  with(manh_data[which.min(manh_data$pvalue),,drop=FALSE] ,
+  points(pos, -log10(pvalue), pch=20, col="red"))
+  # Add a label to the lead SNP
+  with(manh_data[which.min(manh_data$pvalue),,drop=FALSE],
+  text(pos + diff(range(manh_data$pos))*0.2, -log10(pvalue), labels = snps))
+  scan(stdin())
+}
+```
+
+
+Mostly there is a very clear eQTL signal visible, i.e. a distinct peak. Variants which are similar in “height” as the lead cis-eQTL SNP, but lower are most likely SNPs in LD with the lead SNP. In some cases horizontal lines (chunks) become visible which means that those variants are in very high LD among each other, i.e. they are usually inherited together. When variants are in very high LD (horizontal lines) their importance for gene expression cannot be distinguished. Other methods such as fine mapping try to use information like genome segmentation to break the LD blocks into smaller fractions of being more or less likely causal.
+
+### eQTL SNP distance from the TSS
+Usually cis-eQTL SNPs are located around the transcription starting site (TSS) of the associated gene. Depending on the dataset there may be a slight bias to more associations upstream the TSS. When looking at the SNP positions relative to the TSS one has to take the strand of the gene into account, as up- and downstream are always relative to the strand the gene lies on. 
+
+![Distance distribution of cis−eQTLs.](tss_distance_plot.png)
+
+## Other (e)QTL calling algorithms
+
+
+## eQTL analysis in pharmacy and medicine
+
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4140460/
+http://onlinelibrary.wiley.com/doi/10.1111/jth.13639/full
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4479075/
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4580986/
